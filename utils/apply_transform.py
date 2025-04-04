@@ -6,7 +6,7 @@ import subprocess
 output_folder_path = '/media/rishabh/SSD_1/Data/Table_vid_reg/project_2_images'
 path_2_trained_GS = '/home/rishabh/projects/gaussian-splatting/output/table_2/point_cloud/iteration_30000/500_test_point_cloud.ply'
 
-
+..
 def read_csv_transformations(csv_path, transform_key):
     with open(csv_path, mode='r') as file:
         reader = csv.reader(file)
