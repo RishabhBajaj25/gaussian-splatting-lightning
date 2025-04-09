@@ -6,8 +6,7 @@ Usage:
 ```bash
 python utils/apply_transform.py
 ```
-* 
-* 
+
 * <a href="#1-installation">Installation</a>
 * <a href="#2-training">Training</a>
 * <a href="#4-web-viewer">Web Viewer</a>

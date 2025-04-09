@@ -3,8 +3,13 @@ import os.path as osp
 import numpy as np
 import subprocess
 
-output_folder_path = '/media/rishabh/SSD_1/Data/Table_vid_reg/project_2_images'
-path_2_trained_GS = '/home/rishabh/projects/gaussian-splatting/output/table_2/point_cloud/iteration_30000/500_test_point_cloud.ply'
+# '/media/rishabh/SSD_1/Data/Table_vid_reg/project_2_images'
+output_folder_path ='/media/rishabh/SSD_1/Data/Blender_Renders/ct_scan_foot/project_2_images'
+
+# '/home/rishabh/projects/gaussian-splatting/output/table_2/point_cloud/iteration_30000/500_test_point_cloud.ply'
+path_2_trained_GS = '/home/rishabh/projects/r2_gaussian/output/foot/point_cloud/iteration_30000/f_rest_test.ply'
+
+scaling_margin = 5 # in percentage
 
 def read_csv_transformations(csv_path, transform_key):
     with open(csv_path, mode='r') as file:
@@ -46,11 +51,18 @@ with open(global_csv, mode='r') as file:
             scale = float(rows[i + 1][0])
             break
 
+if scale<1:
+    scale = (100-scaling_margin)/100*scale
+else:
+    scale = (100+scaling_margin)/100*scale
+
 # Apply scaling
 input_ply = path_2_trained_GS
 output_ply = input_ply.replace('.ply', '_scale.ply')
 scale_command = f'python gaussian_transform.py {input_ply} {output_ply} --scale {scale}'
 scale_result = subprocess.run(scale_command, shell=True, capture_output=True, text=True)
+print("STDERR:", scale_result.stderr)
+
 print("STDOUT:", scale_result.stdout)
 
 # Apply global transformation
@@ -62,6 +74,7 @@ global_reg_command = (
     f'--rx {global_euler_zyx[2]} --ry {global_euler_zyx[1]} --rz {global_euler_zyx[0]}'
 )
 global_reg_result = subprocess.run(global_reg_command, shell=True, capture_output=True, text=True)
+print("STDERR:", global_reg_result.stderr)
 print("STDOUT:", global_reg_result.stdout)
 
 # Apply fine transformation
@@ -73,6 +86,7 @@ fine_reg_command = (
     f'--rx {fine_euler_zyx[2]} --ry {fine_euler_zyx[1]} --rz {fine_euler_zyx[0]}'
 )
 fine_reg_result = subprocess.run(fine_reg_command, shell=True, capture_output=True, text=True)
+print("STDERR:", fine_reg_result.stderr)
 print("STDOUT:", fine_reg_result.stdout)
 
 print("Yay")
