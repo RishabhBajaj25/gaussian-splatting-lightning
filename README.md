@@ -1,7 +1,7 @@
 # Rishabh's Fork for Gaussian Splatting PyTorch Lightning Implementation
 
 Used in 3DGS_Alignment project to scale and transform Gaussian splats. The transformations are obtained from [3DGS_Alignment](https://github.com/RishabhBajaj25/3DGS_Alignment) project.
-test
+
 Usage:
 ```bash
 python utils/apply_transform.py
