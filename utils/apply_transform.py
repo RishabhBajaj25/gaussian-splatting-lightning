@@ -4,12 +4,14 @@ import numpy as np
 import subprocess
 
 # '/media/rishabh/SSD_1/Data/Table_vid_reg/project_2_images'
-output_folder_path ='/media/rishabh/SSD_1/Data/Blender_Renders/ct_scan_foot/project_2_images'
+# output_folder_path ='/media/rishabh/SSD_1/Data/Blender_Renders/ct_scan_foot/project_2_images'
 
+output_folder_path ='/home/rishabh/projects/gaussian-splatting/output/bunny_v3/point_cloud/iteration_30000/blender_tf'
 # '/home/rishabh/projects/gaussian-splatting/output/table_2/point_cloud/iteration_30000/500_test_point_cloud.ply'
-path_2_trained_GS = '/home/rishabh/projects/r2_gaussian/output/foot/point_cloud/iteration_30000/f_rest_test.ply'
+# path_2_trained_GS = '/home/rishabh/projects/r2_gaussian/output/foot/point_cloud/iteration_30000/f_rest_test.ply'
+path_2_trained_GS = '/home/rishabh/projects/gaussian-splatting/output/bunny_v3/point_cloud/iteration_30000/cleaned_point_cloud.ply'
 
-scaling_margin = 5 # in percentage
+scaling_margin = 0 # in percentage
 
 def read_csv_transformations(csv_path, transform_key):
     with open(csv_path, mode='r') as file:
