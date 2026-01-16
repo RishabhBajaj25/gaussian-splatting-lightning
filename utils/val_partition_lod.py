@@ -31,6 +31,7 @@ def get_metric_calculator(device, val_side: str = None):
     ssim = StructuralSimilarityIndexMeasure(data_range=1.).to(device=device)
     vgg_lpips = LearnedPerceptualImagePatchSimilarity(net_type="vgg", normalize=False).to(device=device)
     alex_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=True).to(device=device)
+    unnormalized_alex_lpips = LearnedPerceptualImagePatchSimilarity(net_type="alex", normalize=False).to(device=device)
 
     def get_metrics(predicts, batch):
         predicted_image = torch.clamp_max(predicts["render"], max=1.)
@@ -65,6 +66,7 @@ def get_metric_calculator(device, val_side: str = None):
             "ssim": ssim(predicted_image, gt_image),
             "vgg_lpips": vgg_lpips(predicted_image, gt_image),
             "alex_lpips": alex_lpips(predicted_image, gt_image),
+            "un_alex_lpips": unnormalized_alex_lpips(predicted_image, gt_image),
         }, (predicted_image.squeeze(0), gt_image.squeeze(0))
 
     return get_metrics
@@ -210,9 +212,11 @@ def main():
     finally:
         async_image_saver.stop()
 
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
     renderer.synchronized = True
     cameras = [camera for camera, _, _ in dataloader]
-    n_val_cameras = len(cameras)
     # n_repeating = max((1024 + n_val_cameras - 1) // n_val_cameras, 8)
     n_repeating = 3
     print("Repeat rendering validation set {} times for evaluating FPS...".format(n_repeating))
@@ -235,8 +239,12 @@ def main():
             render_time_with_lod_preprocess_list.append(predicts["render_time_with_lod_preprocess"])
             n_rendered_frames += 1
 
+            # torch.cuda.empty_cache()
+
+    max_memory_usage = torch.cuda.max_memory_allocated() / (1024. * 1024.)
+
     metric_list_key_by_name = {}
-    available_metric_keys = ["psnr", "ssim", "vgg_lpips", "alex_lpips"]
+    available_metric_keys = ["psnr", "ssim", "vgg_lpips", "alex_lpips", "un_alex_lpips"]
     with open(os.path.join(output_dir, "metrics-{}.csv".format(os.path.basename(output_dir))), "w") as f:
         metrics_writer = csv.writer(f)
         metrics_writer.writerow(["name"] + available_metric_keys)
@@ -266,9 +274,10 @@ def main():
         metrics_writer.writerow(["RenderFPSwithLOD", "{}".format(render_fps_with_lod_preprocess)])
         metrics_writer.writerow(["AverageNGaussians", "{}".format(average_n_gaussians)])
         metrics_writer.writerow(["PeakNGaussians", "{}".format(peak_n_gaussians)])
+        metrics_writer.writerow(["MaxMem", "{}".format(max_memory_usage)])
 
         print(mean_row)
-        print("FPS={}, RenderFPS={}, RenderFPSwithLOD={}, (Average, Peak)NGaussians=({}, {})".format(fps, render_fps, render_fps_with_lod_preprocess, average_n_gaussians, peak_n_gaussians))
+        print("FPS={}, RenderFPS={}, RenderFPSwithLOD={}, (Average, Peak)NGaussians=({}, {}), MaxMem={}".format(fps, render_fps, render_fps_with_lod_preprocess, average_n_gaussians, peak_n_gaussians, max_memory_usage))
 
 
 main()

@@ -94,3 +94,17 @@
 !taming_3dgs/rasterizer-fused_ssim-sparse_adam-aa.yaml
 !taming_3dgs/fused_ssim.yaml
 !fused_ssim.yaml
+!opacity_correction.yaml
+!normal_reg.yaml
+!learn_exposure.yaml
+!learn_exposure-with_bias.yaml
+!learn_exposure-with_bias-shade_correction.yaml
+!vgg_lpips.yaml
+!bilagrid.yaml
+!bilagrid_fused.yaml
+!background_removal.yaml
+!gns.yaml
+!depth_regularization/da3_inverse.yaml
+!grad_acc.yaml
+!plugins
+!glossy.yaml

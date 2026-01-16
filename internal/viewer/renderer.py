@@ -10,6 +10,7 @@ class ViewerRenderer:
             gaussian_model,
             renderer: renderers.Renderer,
             background_color,
+            difix: bool = False,
     ):
         super().__init__()
 
@@ -26,6 +27,11 @@ class ViewerRenderer:
             renderers.RendererOutputInfo("render"),
             self.no_processing,
         )
+
+        self.difix = None
+        self.difix_enabled = False
+        if difix:
+            self._setup_difix()
 
     def set_output_info(
             self,
@@ -81,6 +87,8 @@ class ViewerRenderer:
         if visualizer is None:
             if renderer_output_info.type == renderers.RendererOutputTypes.RGB:
                 visualizer = self.no_processing
+                if self.difix_enabled:
+                    visualizer = self.difix_processor
             elif renderer_output_info.type == renderers.RendererOutputTypes.GRAY:
                 visualizer = self.depth_map_processor
             elif renderer_output_info.type == renderers.RendererOutputTypes.NORMAL_MAP:
@@ -122,8 +130,28 @@ class ViewerRenderer:
 
             self._setup_depth_map_options(viewer, server)
 
+        if self.difix is not None:
+            # TODO: with reference views
+            with server.gui.add_folder("DIFIX"):
+                difix_checkbox = server.gui.add_checkbox(
+                    "Enable",
+                    initial_value=self.difix_enabled,
+                )
+
+                @difix_checkbox.on_update
+                def _(event):
+                    self.difix_enabled = difix_checkbox.value
+                    self._set_output_type("rgb", available_outputs["rgb"])
+                    viewer.rerender_for_all_client()
+
         # update default output type to the first one, must be placed after gui setup
         self._set_output_type(name=first_type_name, renderer_output_info=available_outputs[first_type_name])
+
+    def _setup_difix(self):
+        from internal.utils.pipeline_difix import DifixPipeline
+        # self.difix = DifixPipeline.from_pretrained("nvidia/difix_ref", trust_remote_code=True)
+        self.difix = DifixPipeline.from_pretrained("nvidia/difix", trust_remote_code=True)
+        self.difix.to(self.gaussian_model.get_means().device)
 
     def get_outputs(self, camera, scaling_modifier: float = 1.):
         render_type, output_info, output_processor = self.output_info
@@ -143,10 +171,10 @@ class ViewerRenderer:
     def depth_map_processor(self, depth_map, *args, **kwargs):
         # TODO: the pixels not covered by any Gaussian (alpha==0), should be 1. after normalization
         max_depth = self.max_depth
-        if max_depth == 0:
-            max_depth = depth_map.max()
         # normalize raw depth_map
         depth_map = depth_map - torch.minimum(depth_map.min(), torch.tensor(0., dtype=torch.float, device=depth_map.device))  # avoid negative values
+        if max_depth == 0:
+            max_depth = depth_map.max()
         depth_map = (depth_map / (max_depth + 1e-8)).clamp(max=1.)
         # apply colormap
         return Visualizers.float_colormap(depth_map, self.depth_map_color_map)
@@ -156,6 +184,18 @@ class ViewerRenderer:
 
     def feature_map_processor(self, feature_map, *args, **kwargs):
         return Visualizers.pca_colormap(feature_map)
+
+    @torch.no_grad()
+    def difix_processor(self, rgb, render_outputs, *args, **kwargs):
+        return self.difix(
+            prompt="remove degradation",
+            image=rgb,
+            # ref_image=ref_image,
+            num_inference_steps=1,
+            timesteps=[199],
+            guidance_scale=0.0,
+            output_type="pt",
+        ).images[0]
 
     def no_processing(self, i, *args, **kwargs):
         return i

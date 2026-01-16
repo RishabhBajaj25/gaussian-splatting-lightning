@@ -4,8 +4,10 @@ import argparse
 import numpy as np
 import cv2
 import json
-from joblib import delayed, Parallel
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm.auto import tqdm
 from internal.utils.colmap import read_model, qvec2rotmat
+from internal.dataparsers.estimated_depth_colmap_dataparser import EstimatedDepthColmapDataParser
 
 parser = argparse.ArgumentParser()
 parser.add_argument("dataset_dir")
@@ -38,9 +40,17 @@ points3d_error_ordered[pts_indices] = pts_errors
 
 def get_scales(key, cameras, images, points3d_ordered, points3d_error_ordered, args):
     image_meta = images[key]
+
+    depth_file_path = os.path.join(args.depth_dir, "{}.npy".format(image_meta.name))
+
+    if os.path.exists(depth_file_path) is False:
+        depth_file_path = os.path.join(args.depth_dir, "{}.uint16.png".format(image_meta.name))
+        if os.path.exists(depth_file_path) is False:
+            return None
+
     cam_intrinsic = cameras[image_meta.camera_id]
 
-    pts_idx = images[key].point3D_ids
+    pts_idx = images[key].point3D_ids.astype(np.int64)
 
     # filter out invalid 3D points
     mask = pts_idx >= 0
@@ -67,7 +77,7 @@ def get_scales(key, cameras, images, points3d_ordered, points3d_error_ordered, a
     pts = np.dot(pts, R.T) + image_meta.tvec
 
     invcolmapdepth = 1. / pts[..., 2]
-    invmonodepthmap = np.load(os.path.join(args.depth_dir, "{}.npy".format(image_meta.name)))  # already normalized
+    invmonodepthmap = EstimatedDepthColmapDataParser.load_depth_file(depth_file_path)  # already normalized
 
     if invmonodepthmap is None:
         return None
@@ -106,11 +116,13 @@ def get_scales(key, cameras, images, points3d_ordered, points3d_error_ordered, a
         offset = 0
     return {"image_name": image_meta.name, "scale": scale, "offset": offset}
 
-
-# depth_param_list = [get_scales(key, cameras, images, points3d_ordered, points3d_error_ordered, args) for key in images]
-depth_param_list = Parallel(n_jobs=-1, backend="threading")(
-    delayed(get_scales)(key, cameras, images, points3d_ordered, points3d_error_ordered, args) for key in images
-)
+depth_param_list = []
+with ThreadPoolExecutor() as tpe:
+    futures = []
+    for image_idx in images:
+        futures.append(tpe.submit(get_scales, image_idx, cameras, images, points3d_ordered, points3d_error_ordered, args))
+    for i in tqdm(as_completed(futures), total=len(futures)):
+        depth_param_list.append(i.result())
 
 depth_params = {
     depth_param["image_name"]: {"scale": depth_param["scale"], "offset": depth_param["offset"]}

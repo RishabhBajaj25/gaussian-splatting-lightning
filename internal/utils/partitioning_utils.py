@@ -106,6 +106,8 @@ class PartitionableScene:
 
     point_based_bounding_box: MinMaxBoundingBox = None
 
+    sfm_based_bounding_box: MinMaxBoundingBox = None
+
     scene_bounding_box: SceneBoundingBox = None
 
     partition_coordinates: PartitionCoordinates = None
@@ -120,6 +122,7 @@ class PartitionableScene:
 
     def get_bounding_box_by_camera_centers(self, enlarge: float = 0.):
         self.camera_center_based_bounding_box = Partitioning.get_bounding_box_by_camera_centers(self.camera_centers, enlarge=enlarge)
+        self.sfm_based_bounding_box = self.camera_center_based_bounding_box
         return self.camera_center_based_bounding_box
 
     def get_bounding_box_by_points(self, points: torch.Tensor, enlarge: float = 0., outlier_threshold: float = 0.001):
@@ -128,12 +131,12 @@ class PartitionableScene:
             enlarge=enlarge,
             outlier_threshold=outlier_threshold,
         )
-
+        self.sfm_based_bounding_box = self.point_based_bounding_box
         return self.point_based_bounding_box
 
     def get_scene_bounding_box(self):
         self.scene_bounding_box = Partitioning.align_bounding_box(
-            self.point_based_bounding_box,
+            self.sfm_based_bounding_box,
             origin=self.scene_config.origin,
             size=self.scene_config.partition_size,
         )
@@ -482,8 +485,9 @@ class PartitionableScene:
         self.partition_coordinates, self.is_camera_in_partition, self.is_partitions_visible_to_cameras = self.unmerged
         self.unmerged = None
 
-    def build_output_dirname(self):
-        return "partitions-size_{}-enlarge_{}-{}_visibility_{}_{}".format(
+    def build_output_dirname(self, name: str = None):
+        return "partitions{}-size_{}-enlarge_{}-{}_visibility_{}_{}".format(
+            "-{}".format(name) if name is not None else "",
             self.scene_config.partition_size,
             self.scene_config.location_based_enlarge,
             "convex_hull" if self.scene_config.convex_hull_based_visibility else "point",

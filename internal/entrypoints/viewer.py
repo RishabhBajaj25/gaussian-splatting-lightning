@@ -20,6 +20,8 @@ def cli():
     parser.add_argument("--enable_transform", "--enable-transform",
                         action="store_true", default=False,
                         help="Enable transform options on Web UI. May consume more memory")
+    parser.add_argument("--enable_measurement", "--enable-measurement", "--measure",
+                        action="store_true", default=False)
     parser.add_argument("--show_cameras", "--show-cameras",
                         action="store_true")
     parser.add_argument("--cameras-json", "--cameras_json", type=str, default=None)
@@ -31,6 +33,7 @@ def cli():
     parser.add_argument("--default_camera_look_at", "--dcla", nargs=3, required=False, type=float, default=None)
     parser.add_argument("--no_edit_panel", action="store_true", default=False)
     parser.add_argument("--no_render_panel", action="store_true", default=False)
+    parser.add_argument("--demo_mode", action="store_true", default=False)
     parser.add_argument("--gsplat", action="store_true", default=False,
                         help="Use gsplat v1 renderer for ply file")
     parser.add_argument("--gsplat_aa", action="store_true", default=False,
@@ -44,6 +47,7 @@ def cli():
     parser.add_argument("--vanilla_seganygs", action="store_true", default=False)
     parser.add_argument("--vanilla_mip", action="store_true", default=False)
     parser.add_argument("--vanilla_pvg", action="store_true", default=False)
+    parser.add_argument("--difix", action="store_true", default=False)
     parser.add_argument("--float32_matmul_precision", "--fp", type=str, default=None)
     args = parser.parse_args()
 

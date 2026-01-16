@@ -6,16 +6,16 @@ from torch import nn
 from lightning import LightningModule
 
 from internal.models.vanilla_gaussian import VanillaGaussianModel
-from internal.utils.general_utils import build_rotation
+from internal.utils.general_utils import build_rotation, inverse_sigmoid
 from .density_controller import DensityController, DensityControllerImpl, Utils
 
 
 @dataclass
 class ForegroundFirstDensityController(DensityController):
-    partition: str
+    # partition: str
     """Partition data directory"""
 
-    partition_idx: int
+    # partition_idx: int
 
     max_grad_decay_factor: float = 4
 
@@ -37,6 +37,12 @@ class ForegroundFirstDensityController(DensityController):
     cull_opacity_threshold: float = 0.005
     """threshold of opacity for culling gaussians."""
 
+    cull_by_max_opacity: bool = False
+
+    cull_big_scale: bool = True
+
+    opacity_correction: bool = False
+
     camera_extent_factor: float = 1.
 
     scene_extent_override: float = -1.
@@ -44,6 +50,10 @@ class ForegroundFirstDensityController(DensityController):
     absgrad: bool = False
 
     acc_vis: bool = False
+
+    up_direction: Tuple[float, float, float] = None
+
+    min_alt: float = None
 
     def instantiate(self, *args, **kwargs) -> DensityControllerImpl:
         return ForegroundFirstDensityControllerModule(self)
@@ -66,48 +76,48 @@ class ForegroundFirstDensityControllerModule(DensityControllerImpl):
 
             self._init_state(pl_module.gaussian_model.n_gaussians, pl_module.device)
 
-        # load partition data
-        partition_data = torch.load(os.path.join(
-            self.config.partition,
-            "partitions.pt",
-        ))
+        # # load partition data
+        # partition_data = torch.load(os.path.join(
+        #     self.config.partition,
+        #     "partitions.pt",
+        # ))
 
-        default_partition_size = partition_data["scene_config"]["partition_size"]
-        self.register_buffer(
-            "default_partition_size",
-            torch.tensor(default_partition_size, dtype=torch.float),
-            persistent=False,
-        )
-        partition_size = partition_data["partition_coordinates"]["size"][self.config.partition_idx]
+        # default_partition_size = partition_data["scene_config"]["partition_size"]
+        # self.register_buffer(
+        #     "default_partition_size",
+        #     torch.tensor(default_partition_size, dtype=torch.float),
+        #     persistent=False,
+        # )
+        # partition_size = partition_data["partition_coordinates"]["size"][self.config.partition_idx]
 
-        # get transform matrix
-        try:
-            rotation_transform = partition_data["extra_data"]["rotation_transform"]
-        except:
-            print("FFDensityController: No orientation transform")
-            rotation_transform = torch.eye(4, dtype=torch.float, device=pl_module.device)
-        self.register_buffer(
-            "rotation_transform",
-            rotation_transform,
-            persistent=False,
-        )
+        # # get transform matrix
+        # try:
+        #     rotation_transform = partition_data["extra_data"]["rotation_transform"]
+        # except:
+        #     print("FFDensityController: No orientation transform")
+        #     rotation_transform = torch.eye(4, dtype=torch.float, device=pl_module.device)
+        # self.register_buffer(
+        #     "rotation_transform",
+        #     rotation_transform,
+        #     persistent=False,
+        # )
 
-        # get bounding box
-        partition_bbox_min = partition_data["partition_coordinates"]["xy"][self.config.partition_idx]
-        partition_bbox_max = partition_bbox_min + partition_size
+        # # get bounding box
+        # partition_bbox_min = partition_data["partition_coordinates"]["xy"][self.config.partition_idx]
+        # partition_bbox_max = partition_bbox_min + partition_size
 
-        self.register_buffer("partition_bbox_min", partition_bbox_min, persistent=False)
-        self.register_buffer("partition_bbox_max", partition_bbox_max, persistent=False)
+        # self.register_buffer("partition_bbox_min", partition_bbox_min, persistent=False)
+        # self.register_buffer("partition_bbox_max", partition_bbox_max, persistent=False)
 
-        print("partition_idx=#{}, id={}, transform={}, default_size={}, partition_size={}, bbox=(\n  {}, \n  {}\n)".format(
-            self.config.partition_idx,
-            partition_data["partition_coordinates"]["id"][self.config.partition_idx],
-            self.rotation_transform.tolist(),
-            default_partition_size,
-            partition_size.tolist(),
-            self.partition_bbox_min.tolist(),
-            self.partition_bbox_max.tolist(),
-        ))
+        # print("partition_idx=#{}, id={}, transform={}, default_size={}, partition_size={}, bbox=(\n  {}, \n  {}\n)".format(
+        #     self.config.partition_idx,
+        #     partition_data["partition_coordinates"]["id"][self.config.partition_idx],
+        #     self.rotation_transform.tolist(),
+        #     default_partition_size,
+        #     partition_size.tolist(),
+        #     self.partition_bbox_min.tolist(),
+        #     self.partition_bbox_max.tolist(),
+        # ))
 
     def log_metric(self, name, value):
         self.avoid_state_dict["pl"].logger.log_metrics(
@@ -129,6 +139,9 @@ class ForegroundFirstDensityControllerModule(DensityControllerImpl):
     def before_backward(self, outputs: dict, batch, gaussian_model: VanillaGaussianModel, optimizers: List, global_step: int, pl_module: LightningModule) -> None:
         if global_step >= self.config.densify_until_iter:
             return
+
+        if self.config.cull_by_max_opacity:
+            gaussian_model.update_opacity_max(outputs["opacities"])
 
         outputs["viewspace_points"].retain_grad()
 
@@ -157,7 +170,7 @@ class ForegroundFirstDensityControllerModule(DensityControllerImpl):
     def update_states(self, outputs):
         viewspace_point_tensor, visibility_filter, radii = outputs["viewspace_points"], outputs["visibility_filter"], outputs["radii"]
         if self.config.acc_vis:
-            visibility_filter = viewspace_point_tensor.has_hit_any_pixels
+            visibility_filter = outputs["acc_vis"]
         # retrieve viewspace_points_grad_scale if provided
         viewspace_points_grad_scale = outputs.get("viewspace_points_grad_scale", None)
 
@@ -180,22 +193,14 @@ class ForegroundFirstDensityControllerModule(DensityControllerImpl):
         self.xyz_gradient_accum[update_filter] += grad_norm
         self.denom[update_filter] += 1
 
-    def _get_normalized_distance_to_bounding_box(self, gaussian_model):
-        # transform 3D means
-        transformed_means = gaussian_model.get_means() @ self.rotation_transform[:2, :3].T + self.rotation_transform[:2, 3]  # [N, 2]
-
-        dist_min2p = self.partition_bbox_min - transformed_means
-        dist_p2max = transformed_means - self.partition_bbox_max
-        dxy = torch.maximum(dist_min2p, dist_p2max)
-        distances = torch.sqrt(torch.pow(dxy.clamp(min=0.), 2).sum(dim=-1))
-        return torch.clamp_max(
-            (distances / self.default_partition_size) / self.config.max_radius_factor,
-            max=1.,
-        ), transformed_means, distances  # [N]
-
     def _get_grad_decay_factors(self, gaussian_model):
         # decay grads based on distance (xy only)
-        normalized_distances, _, distances = self._get_normalized_distance_to_bounding_box(gaussian_model)
+        pl_module = self.avoid_state_dict["pl"]
+        distances = pl_module.store.distances
+        normalized_distances = torch.clamp_max(
+            pl_module.store.distance_factors / self.config.max_radius_factor,
+            max=1.,
+        )
         decay_factors = (normalized_distances * (self.config.max_grad_decay_factor - 1)) + 1
 
         return decay_factors, distances
@@ -215,15 +220,33 @@ class ForegroundFirstDensityControllerModule(DensityControllerImpl):
         self._densify_and_split(grads, gaussian_model, optimizers)
 
         # prune
-        prune_mask = (gaussian_model.get_opacities() < min_opacity).squeeze()
+        if self.config.cull_by_max_opacity:
+            # TODO: re-implement as a new density controller
+            prune_mask = torch.logical_and(
+                gaussian_model.get_opacity_max() >= 0.,
+                gaussian_model.get_opacity_max() < min_opacity,
+            )
+            gaussian_model.reset_opacity_max()
+        else:
+            prune_mask = (gaussian_model.get_opacities() < min_opacity).squeeze()
+
         self.log_metric("min_opacity_count", prune_mask.sum())
 
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             self.log_metric("big_points_vs_count", big_points_vs.sum())
-            big_points_ws = gaussian_model.get_scales().max(dim=1).values > 0.1 * prune_extent
-            self.log_metric("big_points_ws_count", big_points_ws.sum())
-            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            prune_mask = torch.logical_or(prune_mask, big_points_vs)
+            if self.config.cull_big_scale:
+                big_points_ws = gaussian_model.get_scales().max(dim=1).values > 0.1 * prune_extent
+                self.log_metric("big_points_ws_count", big_points_ws.sum())
+                prune_mask = torch.logical_or(prune_mask, big_points_ws)
+
+        if self.config.min_alt is not None:
+            alt = torch.inner(gaussian_model.get_means(), torch.tensor(self.config.up_direction, dtype=torch.float, device=grads.device))
+            min_alt_mask = alt < self.config.min_alt
+            prune_mask = torch.logical_or(prune_mask, min_alt_mask)
+            self.log_metric("min_alt_count", min_alt_mask.sum())
+
         self.log_metric("prune_count", prune_mask.sum())
         self._prune_points(prune_mask, gaussian_model, optimizers)
 
@@ -248,6 +271,14 @@ class ForegroundFirstDensityControllerModule(DensityControllerImpl):
         new_properties = {}
         for key, value in gaussian_model.properties.items():
             new_properties[key] = value[selected_pts_mask]
+
+        if self.config.opacity_correction:
+            # NEW: Opacity correction
+            current_opacity = gaussian_model.get_opacities()[selected_pts_mask]
+            alpha_hat = 1. - torch.sqrt(1. - current_opacity)
+            raw_alpha_hat = gaussian_model.opacity_inverse_activation(alpha_hat)
+            gaussian_model.properties["opacities"][selected_pts_mask] = raw_alpha_hat
+            new_properties["opacities"] = raw_alpha_hat
 
         # Update optimizers and properties
         self._densification_postfix(new_properties, gaussian_model, optimizers)

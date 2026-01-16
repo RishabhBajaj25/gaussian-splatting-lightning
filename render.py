@@ -27,6 +27,7 @@ def initializer_viewer_renderer(
         background_color,
         renderer_override,
         device,
+        difix: bool = False,
 ) -> ViewerRenderer:
     if len(args.model_paths) == 1 and args.model_paths[0].endswith(".yaml"):
         import yaml
@@ -47,20 +48,30 @@ def initializer_viewer_renderer(
         renderer = None
 
         load_device = torch.device("cuda") if len(model_paths) == 1 or enable_transform is False else torch.device("cpu")
+        # TODO: pick the renderer from the first model so that it is consistent with the viewer
         for model_path in model_paths:
             model, renderer = GaussianModelLoader.search_and_load(model_path, load_device)
             model.freeze()
             model_list.append(model)
 
-        if len(model_paths) > 1:
-            renderer = VanillaRenderer()
         if renderer_override is not None:
             print(f"Renderer: {renderer_override.__class__}")
             renderer = renderer_override
 
         model_manager = MultipleGaussianModelEditor(model_list, device)
 
-    return ViewerRenderer(model_manager, renderer, torch.tensor(background_color, dtype=torch.float, device=device))
+    renderer = ViewerRenderer(
+        model_manager,
+        renderer,
+        torch.tensor(background_color, dtype=torch.float, device=device),
+        difix=difix,
+    )
+    # Enable difix
+    if difix:
+        renderer.difix_enabled = True
+        renderer._set_output_type("rgb", renderer_output_info=renderer.renderer.get_available_outputs()["rgb"])
+
+    return renderer
 
 
 def parse_camera_poses(camera_path: dict):
@@ -228,6 +239,7 @@ if __name__ == "__main__":
                         help="increase this to speedup rendering, but more memory will be consumed")
     parser.add_argument("--disable-transform", action="store_true", default=False)
     parser.add_argument("--vanilla_gs2d", action="store_true", default=False)
+    parser.add_argument("--difix", action="store_true", default=False)
     args = parser.parse_args()
 
     device = torch.device("cuda")
@@ -251,6 +263,7 @@ if __name__ == "__main__":
         background_color=camera_path["background_color"],
         renderer_override=renderer_override,
         device=device,
+        difix=args.difix,
     )
 
     if args.type is not None:

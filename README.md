@@ -12,6 +12,9 @@ python utils/apply_transform.py
 * <a href="#2-training">Training</a>
 * <a href="#4-web-viewer">Web Viewer</a>
 * <a href="https://github.com/yzslab/gaussian-splatting-lightning/releases">Changelog</a>
+## News
+* [2025-06-29] Our paper "<a href="https://yzslab.github.io/REUrbanGS/">Robust and Efficient 3D Gaussian Splatting for Urban Scene Reconstruction</a>" has been accepted to ICCV 2025, and we will release the code here soon. Stay tuned!
+
 ## Known issues
 * ~~Multi-GPU training can only be enabled after densification~~ (Try <a href="#216-new-multiple-gpu-training-strategy">2.16. New Multiple GPU training strategy</a>)
 ## Features
@@ -42,7 +45,6 @@ python utils/apply_transform.py
   * <a href="#28-absgs--efficientgs">AbsGS / EfficientGS (2.8.)</a>
   * <a href="#29-2d-gaussian-splatting">2D Gaussian Splatting (2.9.)</a>
   * <a href="#210-segment-any-3d-gaussians">Segment Any 3D Gaussians (2.10.)</a>
-  * Large-scale scene reconstruction with partitioning and LoD <a href="#211-large-scale-scene-reconstruction-with-partitioning-and-lod"> (2.11.)</a>
   * <a href="#212-appearance-model">New Appearance Model (2.12.)</a>: improve the quality when images have various appearances
   * <a href="#213-3dgs-mcmc">3D Gaussian Splatting as Markov Chain Monte Carlo (2.13.)</a>
   * <a href="#214-feature-distillation">Feature distillation (2.14.)</a>
@@ -53,6 +55,8 @@ python utils/apply_transform.py
   * <a href="#219-stopthepop">StopThePop (2.19.)</a>
   * <a href="#220-scale-regularization">Scale Regularization (2.20.)</a>
   * <a href="#221-taming-3dgs">Taming 3DGS (2.21.)</a>
+  * <a href="#222-bilateral-grid">Bilateral Grid</a>
+  * <a href="#223-gns">GNS</a>
 ## 1. Installation
 ### 1.1. Clone repository
 
@@ -373,210 +377,6 @@ python utils/fuse_mip_filter.py \
   ```
   <video src="https://github.com/yzslab/gaussian-splatting-lightning/assets/564361/0b98a8ed-77d7-436d-b9f8-c5b51af5ba52"></video>
 
-### 2.11. Large-scale scene reconstruction with partitioning and LoD
-| Baseline | Partitioning |
-| --- | --- |
-| ![image](https://github.com/yzslab/gaussian-splatting-lightning/assets/564361/d3cb7d1a-f319-4315-bfa3-b56e3a98b19e) | ![image](https://github.com/yzslab/gaussian-splatting-lightning/assets/564361/12f930ee-eb5d-41c6-9fb7-6d043122a91c) |
-| ![image](https://github.com/yzslab/gaussian-splatting-lightning/assets/564361/cec1bb13-15c0-4c6b-8d33-83bc21f2160e) | ![image](https://github.com/yzslab/gaussian-splatting-lightning/assets/564361/6bfd0130-29be-401f-ac9f-ce07dffe9fdd) |
-
-The implementation here references <a href="https://waymo.com/research/block-nerf/">Block-NeRF</a>, <a href="https://vastgaussian.github.io/">VastGaussian</a> and <a href="https://dekuliutesla.github.io/citygs/">CityGaussians</a>.
-
-There is no single script to finish the whole pipeline. Please refer to below contents about how to reconstruct a large scale scene.
-* Partitioning
-  * MatrixCity: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/notebooks/matrix_city_split.ipynb">notebooks/matrix_city_split.ipynb</a> (Refer to <a href="https://github.com/yzslab/gaussian-splatting-lightning/tree/main/configs/matrixcity/README.md">MatrixCity.md</a> about preparing MatrixCity dataset)
-  * Colmap: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/notebooks/colmap_split_v2.ipynb">notebooks/colmap_split_v2.ipynb</a>
-* Training
-  
-  <b>[NOTE]</b> You must explicitly specify using a  `gsplat`-based renderer (e.g., `configs/gsplat.yaml`, `configs/appearance_embedding_renderer`, `configs/mip_splatting_gsplat.yaml`, etc) because some parts of the pipeline make assumptions about this. If you do not, it will use `diff-gaussian-rasterization` by default, which will cause a drop in the final quality.
-  
-  * MatrixCity: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/utils/train_matrix_city_partitions_v2.py">utils/train_matrix_city_partitions_v2.py</a>
-  * Colmap: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/utils/train_colmap_partitions_v2.py">utils/train_colmap_partitions_v2.py</a>
-* Optional LightGaussian pruning
-  * Pruning: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/utils/prune_partitions_v2.py">utils/prune_partitions_v2.py</a>
-  * Finetune after pruning: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/utils/finetune_pruned_partitions_v2.py">utils/finetune_pruned_partitions_v2.py</a>
-* Merging: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/utils/merge_partitions_v2.py">utils/merge_partitions_v2.py</a>
-* LoD: <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/internal/renderers/partition_lod_renderer.py">internal/renderers/partition_lod_renderer.py</a>
-
-#### (1) An example pipeline for the <a href="https://storage.cmusatyalab.org/mega-nerf-data/rubble-pixsfm.tgz">Rubble</a> dataset from <a href="https://meganerf.cmusatyalab.org/">MegaNeRF</a>
-
-* First prepare the dataset
-  ```bash
-  # 1. download the dataset
-  mkdir -p data/MegaNeRF
-  pushd data/MegaNeRF
-  wget -O rubble-pixsfm.tgz https://storage.cmusatyalab.org/mega-nerf-data/rubble-pixsfm.tgz
-  tar -zxf rubble-pixsfm.tgz
-  popd
-  
-  # 2. create a colmap sparse model from provided camera poses
-  wget -O vocab_tree_flickr100K_words256K.bin https://demuc.de/colmap/vocab_tree_flickr100K_words256K.bin
-  python utils/meganerf2colmap.py data/MegaNeRF/rubble-pixsfm -v vocab_tree_flickr100K_words256K.bin
-  
-  # 3. down sample images
-  python utils/image_downsample.py data/MegaNeRF/rubble-pixsfm/colmap/images --factor 3
-  ```
-  The intrinsics and extrinsics provided in the `Rubble` dataset seem not optimal and will produce a slightly blurry result. Run a sparse reconstruction from scratch if you want to avoid it.
-
-* Generate appearance groups
-
-  The Rubble dataset contains images in various lighting conditions. Enabling the appearance model can improve the quality. In order to do so, appearance groups must be generated first.
-  ```bash
-  python utils/generate_image_apperance_groups.py \
-      data/MegaNeRF/rubble-pixsfm/colmap \
-      --image \
-      --name appearance_image_dedicated
-  ```
-
-* Partitioning: simply use <a href="https://github.com/yzslab/gaussian-splatting-lightning/blob/main/notebooks/meganerf_rubble_split.ipynb">notebooks/meganerf_rubble_split.ipynb</a>, and remember to change the value of `dataset_path` in this notebook
-
-* Training
-  ```bash
-  PARTITION_DATA_PATH="data/MegaNeRF/rubble-pixsfm/colmap/partitions-size_60.0-enlarge_0.1-visibility_0.9_0.25"
-  PROJECT_NAME="MegaNeRF-rubble"
-  
-  python utils/train_colmap_partitions_v2.py \
-      ${PARTITION_DATA_PATH} \
-      -p ${PROJECT_NAME} \
-      --scalable-config utils/scalable_param_configs/appearance.yaml \
-      --config configs/appearance_embedding_renderer/sh_view_dependent.yaml \
-      -- \
-      --data.parser.appearance_groups appearance_image_dedicated \
-      --model.gaussian.optimization.spatial_lr_scale 15 \
-      --data.parser.down_sample_factor 3
-  ```
-  
-  Parameter Explanations
-  * `utils/train_colmap_partitions_v2.py`
-    * The first is the path of the directory containing the partition data, it is the value of `output_path` in the partitioning notebook
-    * `-p`: the project name, all the trained partition models will be stored in `outputs/PROJECT_NAME`
-    * `--scalable-config`: the path of the yaml file specifying the hyperparameters that will be adjusted according to the image number
-    * `--config`: the config file used for training
-    * `--`: all the parameters after this will be passed to `main.py` as-is
-  * `main.py`
-    * `--data.parser.appearance_groups`: the name of the generated appearance groups
-    * `--model.gaussian.optimization.spatial_lr_scale`: the LR of the 3D means of Gaussians will be multiplied by this value, which determines how finely the structure can be modeled
-    
-      By default, this value will be calculated automatically according to the camera poses if it is omitted, but this will lead to suboptimal results for large-scale scenes. Therefore you had better provide it manually.
-    
-      Please note that this is a scene-specific hyperparameter. You should not use the same value for another scene, or even when you run a colmap sparse reconstruction a second time. Additionally, the value `15` is not the optimal one for the dataset Rubble.
-    * `--data.parser.down_sample_factor`: down sample factor of the images
-
-* Merging
-  ```bash
-  python utils/merge_partitions_v2.py \
-      ${PARTITION_DATA_PATH} \
-      -p ${PROJECT_NAME}
-  ```
-
-  Then you can start the web viewer with the merged checkpoint file.
-
-* Optional prune and finetune
-  * Prune
-    ```bash
-    python utils/prune_partitions_v2.py \
-        ${PARTITION_DATA_PATH} \
-        -p ${PROJECT_NAME}
-    ```
-  * Finetune
-    ```bash
-    PRUNED_PROJECT_NAME="${PROJECT_NAME}-pruned"
-    python utils/finetune_pruned_partitions_v2.py \
-        ${PARTITION_DATA_PATH} \
-        -p ${PRUNED_PROJECT_NAME} \
-        -t ${PROJECT_NAME} \
-        --scalable-config utils/scalable_param_configs/appearance.yaml
-    ```
-    It will load trained model from `outputs/${PROJECT_NAME}`, and the finetuned outputs will be saved to `outputs/${PRUNED_PROJECT_NAME}`.
-
-  * Merge finetuned outputs
-    ```bash
-    python utils/merge_partitions_v2.py \
-        ${PARTITION_DATA_PATH} \
-        -p ${PRUNED_PROJECT_NAME}
-    ```
- * LoD Rendering
-   
-   With LoD, the renderer will select the finer models for partitions close to the camera, and coarser models for those far away.
-   
-   * (a) Preprocess partitions' checkpoints
-     
-     This is done by simply add an option `--preprocess` when running `utils/merge_partitions_v2.py`. You need to run it for every level.
-     
-     ```bash
-     # First for the original models
-     python utils/merge_partitions_v2.py \
-         --preprocess \
-         ${PARTITION_DATA_PATH} \
-         -p ${PROJECT_NAME}
-
-     # Then for the pruned models
-     python utils/merge_partitions_v2.py \
-         --preprocess \
-         ${PARTITION_DATA_PATH} \
-         -p ${PRUNED_PROJECT_NAME}
-      ```
-
-   * (b) Create a LoD config file in YAML
-     ```yaml
-     # `data` is the path to your partition data
-     data: data/MegaNeRF/rubble-pixsfm/colmap/partitions-size_60.0-enlarge_0.1-visibility_0.9_0.25
-     # `names` is a list of project names, where order represents their detail levels, ranging from fine to coarse
-     names:
-       - MegaNeRF-rubble  # without pruning
-       - MegaNeRF-rubble-pruned  # pruned
-       # - MegaNeRF-rubble-pruned_again  # add more lines if you have
-     ```
-   * (c) Start the viewer
-     ```bash
-     python viewer YOU_LOD_CONFIG_FILE_PATH.yaml
-     ```
-
-#### (2) Utilize multiple GPUs
-
-* Train/prune/finetune multiple partitions in parallel
-  
-  The options `--n-processes` and `--process-id` are designed for the parallel purpose. `--n-processes` is the total number of GPUs you want to use, which has the same meaning as world size. `--process-id` is the unique process id, just like the global rank, but ranging from 1 to the value of `--n-processes` here.  Please <b>note</b> that both of the options should be placed before `--`.
-
-  Assuming you have 2 machines, and both of them are equipped with 2 GPUs:
-
-  * On the first machine
-  
-    First run:
-    ```bash
-    CUDA_VISIBLE_DEVICES=0 python utils/train_colmap_partitions_v2.py \
-        ... \
-        --n-processes 4 \
-        --process-id 1 \
-        -- \
-        ...
-    ```
-    
-    Then run this in another terminal: `CUDA_VISIBLE_DEVICES=1 python ... --n-processes 4 --process-id 2`
-  
-  * On the second machine
-    
-    First: `CUDA_VISIBLE_DEVICES=0 python ... --n-processes 4 --process-id 3`
-    
-    Then another terminal:`CUDA_VISIBLE_DEVICES=1 python ... --n-processes 4 --process-id 4`
-  
-  Or submit partition training jobs to Slurm:
-  ```bash
-  # Adding params after the 2nd `--` means submitting jobs to Slurm,
-  #   and those params belong to `srun`.
-  # Do not add `--n-processes` and `--process-id` here.
-  python utils/train_colmap_partitions_v2.py \
-     ... \
-     -- \
-     ... \
-     -- \
-     --gres=gpu:1  # one gpu per-partition training job
-  ```
-
-* Train/finetune a partition with multiple GPUs
-  * Training only works with the <a href="#216-new-multiple-gpu-training-strategy">strategy introduced in 2.16.</a>
-  * Finetune only works with <a href="#24-multi-gpu-training-ddp">DDP</a>
-
-
 ### 2.12. Appearance Model
 With appearance model, the reconstruction quality can be improved when your images have various appearance, such as different exposure, white balance, contrast and even day and night.
 
@@ -743,9 +543,9 @@ If you have not downsized images, remember to add a `--data.parser.down_sample_f
 
 ```bash
 python main.py validate \
+   --config outputs/brandenburg_gate/lightning_logs/version_0/config.yaml \
    --save_val \
-   --val_train \
-   --config outputs/brandenburg_gate/lightning_logs/version_0/config.yaml  # you may need to change this path
+   --val_train
 ```
 
 Then you can find the rendered masks and images in `outputs/brandenburg_gate/val`.
@@ -932,7 +732,7 @@ There are two implementations: one is the gsplat v1 based, and the other is the 
 * (a) Install libraries first
   * fused-ssim
     ```bash
-    pip install -r requirements/fused-ssim.txt
+    pip install --no-build-isolation -r requirements/fused-ssim.txt
     ```
 
   * my modified gsplat v1 if you want the gsplat v1 based one (refer to <a href="#15-install-optional-packages">1.5.</a> for the setup guide)
@@ -952,6 +752,29 @@ There are two implementations: one is the gsplat v1 based, and the other is the 
 
   You need to adjust the `--model.density.budget` if you want to use the steerable one.
 
+### 2.22. <a href="https://bilarfpro.github.io/">Bilateral Grid</a>
+
+The negative impacts of appearance variations can be largely mitigated using this method.
+
+* PyTorch based version: `configs/bilagrid.yaml`
+* Faster Fully-Fused version
+  * Install the <a href="https://github.com/harry7557558/fused-bilagrid">fused-bilagrid</a> first: `pip install -r requirements/fused-bilagrid.txt`
+  * Then run training with `configs/bilagrid_fused.yaml`
+
+
+### 2.23. <a href="https://xiaobin2001.github.io/GNS-web/">GNS</a>
+
+Better quality can be achieved with fewer primitives.
+
+My modified gsplat v1 is required.
+
+```bash
+python main.py fit \
+  --config configs/gsplat_v1.yaml \
+  --config configs/gns.yaml \
+  --model.density.budget YOUR_EXPECTED_BUDGET_GOES_HERE \
+  ...
+```
 
 ## 3. Evaluation
 

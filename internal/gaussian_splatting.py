@@ -5,13 +5,12 @@ import traceback
 from typing import Tuple, List, Dict, Union, Any, Callable, Optional
 from typing_extensions import Self
 
-import torch.optim
+import torch
 import torchvision
 import wandb
 import csv
-from lightning.pytorch.core.module import MODULE_OPTIMIZERS
-from lightning.pytorch import LightningDataModule, LightningModule
-from lightning.pytorch.utilities.types import OptimizerLRScheduler, LRSchedulerPLType, STEP_OUTPUT
+from lightning.pytorch import LightningModule
+from lightning.pytorch.utilities.types import STEP_OUTPUT
 import lightning.pytorch.loggers
 
 import internal.mp_strategy
@@ -25,10 +24,16 @@ from internal.metrics.metric import Metric
 from internal.metrics.vanilla_metrics import VanillaMetrics
 from internal.density_controllers.density_controller import DensityController
 from internal.density_controllers.vanilla_density_controller import VanillaDensityController
+from internal.stores.vanilla_store import Store, VanillaStore
+from internal.output_processors.output_processors import OutputProcessor, VanillaOutputProcessor
+from internal.opt_strategies.opt_strategy import OptStrategy
+from internal.opt_strategies.vanilla import VanillaOptStrategy
+from internal.plugins.plugin import Plugin
 from jsonargparse import lazy_instance
 
 from internal.utils.sh_utils import eval_sh
 from internal.utils.graphics_utils import store_ply
+from internal.utils.image_utils import save_tensor_image
 
 
 class GaussianSplatting(LightningModule):
@@ -46,10 +51,15 @@ class GaussianSplatting(LightningModule):
             renderer: Union[Renderer, RendererConfig] = lazy_instance(VanillaRenderer),
             metric: Metric = lazy_instance(VanillaMetrics),
             density: DensityController = lazy_instance(VanillaDensityController),
+            store: Optional[Store] = lazy_instance(VanillaStore),
+            output_processor: Optional[OutputProcessor] = lazy_instance(VanillaOutputProcessor),
             save_ply: bool = False,
             web_viewer: bool = False,
             initialize_from: str = None,
             renderer_output_types: Optional[List[str]] = None,
+            drop_optimizer_states: bool = False,
+            opt_strategy: OptStrategy = lazy_instance(VanillaOptStrategy),
+            plugins: List[Plugin] = [],
     ) -> None:
         super().__init__()
         self.automatic_optimization = False
@@ -74,6 +84,12 @@ class GaussianSplatting(LightningModule):
         # metrics
         self.metric = metric.instantiate()
 
+        # store
+        self.store = store.instantiate()
+
+        # output_processor
+        self.output_processor = output_processor.instantiate()
+
         # background color
         self.background_color = torch.tensor(background_color, dtype=torch.float32)
         if random_background is True:
@@ -84,8 +100,8 @@ class GaussianSplatting(LightningModule):
         self.web_viewer: TrainingViewer = None
 
         self.batch_size = 1
-        self.restored_epoch = 0
-        self.restored_global_step = 0
+        self.restored_epoch = -1
+        self.restored_global_step = -1
 
         self.max_image_saving_threads = 16
         self.image_queue = queue.Queue(maxsize=self.max_image_saving_threads)
@@ -96,8 +112,11 @@ class GaussianSplatting(LightningModule):
         # hooks
         self.on_train_start_hooks: List[Callable[[GaussianModel, Self], None]] = []
         self.on_after_backward_hooks: List[Callable[[Dict, Any, GaussianModel, int, Self], None]] = []
+        self.on_train_batch_start_hooks: List[Callable[[Any, GaussianModel, int, Self], None]] = []
         self.on_train_batch_end_hooks: List[Callable[[Dict, Any, GaussianModel, int, Self], None]] = []
         self.extra_train_metrics: List[Callable[[Dict, Any, GaussianModel, int, Self], torch.Tensor]] = []
+
+        self.plugins = torch.nn.ModuleList()
 
     def log_metrics(
             self,
@@ -125,7 +144,7 @@ class GaussianSplatting(LightningModule):
         return torch.rand(3)
 
     def _initialize_gaussians_from_trained_model(self):
-        assert self.hparams["gaussian"].extra_feature_dims == 0
+        # assert self.hparams["gaussian"].extra_feature_dims == 0
 
         from internal.utils.gaussian_model_loader import GaussianModelLoader
         load_from = GaussianModelLoader.search_load_file(self.hparams["initialize_from"])
@@ -152,7 +171,7 @@ class GaussianSplatting(LightningModule):
         self.hparams["gaussians"] = gaussian_model.config
         self.gaussian_model = gaussian_model
 
-        print(f"initialize from {load_from}: sh_degree={self.gaussian_model.max_sh_degree}")
+        self.print(f"initialize from {load_from}: sh_degree={self.gaussian_model.max_sh_degree}")
 
     def setup(self, stage: str):
         if stage == "fit":
@@ -164,9 +183,11 @@ class GaussianSplatting(LightningModule):
             if self.hparams["save_val_metrics"] is None:
                 self.hparams["save_val_metrics"] = True
 
+        self.store.setup(stage=stage, pl_module=self)
         self.renderer.setup(stage=stage, lightning_module=self)
         self.metric.setup(stage=stage, pl_module=self)
         self.density_controller.setup(stage=stage, pl_module=self)
+        self.output_processor.setup(stage=stage, pl_module=self)
 
         # use different image log method based on the logger type
         self.log_image = None
@@ -176,6 +197,9 @@ class GaussianSplatting(LightningModule):
             self.log_image = self.wandb_log_image
 
     def on_load_checkpoint(self, checkpoint) -> None:
+        if self.hparams["drop_optimizer_states"]:
+            checkpoint["optimizer_states"] = []
+
         # reinitialize parameters based on the gaussian number in the checkpoint
         self.gaussian_model.setup_from_number(checkpoint["state_dict"]["gaussian_model.gaussians.means"].shape[0])
         if "frozen_gaussians.means" in checkpoint["state_dict"]:
@@ -256,36 +280,6 @@ class GaussianSplatting(LightningModule):
             render_types=self.renderer_output_types,
         )
 
-    def optimizers(self, use_pl_optimizer: bool = True):
-        optimizers = super().optimizers(use_pl_optimizer=use_pl_optimizer)
-
-        if isinstance(optimizers, list) is False:
-            return [optimizers]
-
-        """
-        IMPORTANCE: the global_step will be increased on every step() call of all the optimizers,
-        issue https://github.com/Lightning-AI/lightning/issues/17958,
-        here change _on_before_step and _on_after_step to override this behavior.
-        """
-        for idx, optimizer in enumerate(optimizers):
-            if idx == 0:
-                continue
-            optimizer._on_before_step = lambda: self.trainer.profiler.start("optimizer_step")
-            optimizer._on_after_step = lambda: self.trainer.profiler.stop("optimizer_step")
-
-        return optimizers
-
-    def lr_schedulers(self) -> Union[None, List[LRSchedulerPLType], LRSchedulerPLType]:
-        schedulers = super().lr_schedulers()
-
-        if schedulers is None:
-            return []
-
-        if isinstance(schedulers, list) is False:
-            return [schedulers]
-
-        return schedulers
-
     def is_final_step(self, step: int = None):
         if step is None:
             step = self.trainer.global_step
@@ -313,10 +307,16 @@ class GaussianSplatting(LightningModule):
             )
             self.web_viewer.start()
 
+        self.opt_strategy = self.hparams["opt_strategy"].instantiate()
+        self.opt_strategy.on_train_start(self)
+
         for i in self.on_train_start_hooks:
             i(self.gaussian_model, self)
 
     def on_train_batch_start(self, batch: Any, batch_idx: int):
+        for i in self.on_train_batch_start_hooks:
+            i(batch, self.gaussian_model, self.trainer.global_step, self)
+
         if self.web_viewer is not None:
             self.web_viewer.training_step(
                 self.gaussian_model,
@@ -332,14 +332,6 @@ class GaussianSplatting(LightningModule):
 
         global_step = self.trainer.global_step + 1  # must start from 1 to prevent densify at the beginning
 
-        # get optimizers and schedulers
-        optimizers = self.optimizers()
-        schedulers = self.lr_schedulers()
-
-        # zero grad
-        for optimizer in optimizers:
-            optimizer.zero_grad(set_to_none=True)
-
         # save checkpoint
         # checkpoint will always be saved after final step, so do not save for final step here
         if global_step in self.hparams["save_iterations"] and self.is_final_step(global_step) is False and self.trainer.global_step != self.restored_global_step:
@@ -350,15 +342,17 @@ class GaussianSplatting(LightningModule):
 
         # forward
         outputs = self(camera)
+        # output processors
+        self.output_processor.training_forward(batch, outputs)
         # metrics
         metrics, prog_bar = self.metric.get_train_metrics(self, self.gaussian_model, global_step, batch, outputs)
-        self.log_metrics(metrics, prog_bar, prefix="train", on_step=True, on_epoch=False)
-
         for i in self.extra_train_metrics:
-            metrics["loss"] = metrics["loss"] + i(outputs, batch, self.gaussian_model, global_step, self)
+            i(outputs, batch, self.gaussian_model, global_step, self, metrics, prog_bar)
+        self.log_metrics(metrics, prog_bar, prefix="train", on_step=True, on_epoch=False)
 
         # log learning rate and gaussian count every 100 iterations (without plus one step)
         if self.trainer.global_step % 100 == 0:
+            optimizers = self.optimizers(use_pl_optimizer=False)
             metrics_to_log = {
                 "train/gaussians_count": self.gaussian_model.get_xyz.shape[0],
             }
@@ -384,6 +378,11 @@ class GaussianSplatting(LightningModule):
         )
         # backward
         self.manual_backward(metrics["loss"])
+
+        # invoke hooks
+        for i in self.on_after_backward_hooks:
+            i(outputs, batch, self.gaussian_model, global_step, self)
+
         # invoke `after_backward` interface of density controller
         self.density_controller.after_backward(
             outputs=outputs,
@@ -393,21 +392,12 @@ class GaussianSplatting(LightningModule):
             global_step=global_step,
             pl_module=self,
         )
-        # invoke other hooks
-        for i in self.on_after_backward_hooks:
-            i(outputs, batch, self.gaussian_model, global_step, self)
 
         # optimize
-        for optimizer in optimizers:
-            optimizer.step()
-
-        # schedule lr
-        for scheduler in schedulers:
-            scheduler.step()
+        self.opt_strategy.step(global_step, self)
 
     def light_gaussian_prune(self, global_step):
         # TODO: move elsewhere
-
         """
         LightGaussian prune
         """
@@ -441,17 +431,17 @@ class GaussianSplatting(LightningModule):
             prune_percent = self.light_gaussian_hparams.prune_percent * (self.light_gaussian_hparams.prune_decay ** prune_step_index)
             prune_mask = get_prune_mask(prune_percent, v_list)
 
-            print(f"number_of_gaussian={self.gaussian_model.get_xyz.shape[0]}, "
-                  f"number_to_prune={prune_mask.sum().item()}, "
-                  f"prune_percent={prune_percent}, "
-                  f"anti_aliased={anti_aliased}")
+            self.print(f"number_of_gaussian={self.gaussian_model.get_xyz.shape[0]}, "
+                       f"number_to_prune={prune_mask.sum().item()}, "
+                       f"prune_percent={prune_percent}, "
+                       f"anti_aliased={anti_aliased}")
 
             from internal.density_controllers.density_controller import Utils
             valid_points_mask = ~prune_mask  # `True` to keep
             self.gaussian_model.properties = Utils.prune_properties(valid_points_mask, self.gaussian_model, self.gaussian_optimizers)
             self.density_updated_by_renderer()
 
-            print(f"number_of_gaussian_after_pruning={self.gaussian_model.get_xyz.shape[0]}")
+            self.print(f"number_of_gaussian_after_pruning={self.gaussian_model.get_xyz.shape[0]}")
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         # the value of `trainer.global_step` here
@@ -485,6 +475,7 @@ class GaussianSplatting(LightningModule):
 
         # forward
         outputs = self(camera)
+        self.output_processor.training_forward(batch, outputs)
         metrics, prog_bar = self.metric.get_validate_metrics(self, self.gaussian_model, batch, outputs)
         self.log_metrics(metrics, prog_bar, prefix=name, on_step=False, on_epoch=True)
         self.val_metrics.append((image_info[0], metrics))
@@ -599,6 +590,8 @@ class GaussianSplatting(LightningModule):
             try:
                 image_list = [item["gt_image"]]
                 for i in item["output_images"]:
+                    if i.shape[0] == 1:
+                        i = i.repeat(3, 1, 1)
                     image_list.append(i)
                 image = torch.concat(image_list, dim=-1)
 
@@ -616,12 +609,12 @@ class GaussianSplatting(LightningModule):
                         item["epoch"],
                         item["step"],
                     ),
-                    "{}.png".format(item["image_name"].replace("/", "_"))
+                    "{}.jpg".format(item["image_name"].replace("/", "_"))
                 )
                 os.makedirs(os.path.dirname(image_output_path), exist_ok=True)
-                torchvision.utils.save_image(
-                    image,
+                save_tensor_image(
                     image_output_path,
+                    image,
                 )
             except:
                 traceback.print_exc()
@@ -668,6 +661,19 @@ class GaussianSplatting(LightningModule):
         metric_optimizer, metric_scheduler = self.metric.training_setup(self)
         add_optimizers_and_schedulers(metric_optimizer, metric_scheduler)
 
+        # output processors
+        op_optimizer, op_scheduler = self.output_processor.training_setup(self)
+        add_optimizers_and_schedulers(op_optimizer, op_scheduler)
+
+        # plugins
+        for i in self.hparams["plugins"]:
+            plugin = i.instantiate()
+            plugin.setup(self)
+            self.plugins.append(plugin)
+
+        self.unwrapped_optimizers = optimizers
+        self.unwrapped_schedulers = schedulers
+
         return optimizers, schedulers
 
     def density_updated_by_renderer(self):
@@ -692,7 +698,7 @@ class GaussianSplatting(LightningModule):
                 GaussianPlyUtils.load_from_model(self.gaussian_model).to_ply_format().save_to_ply(output_path + ".tmp")
                 os.rename(output_path + ".tmp", output_path)
 
-            print("Gaussians saved to {}".format(output_path))
+            self.print("Gaussians saved to {}".format(output_path))
 
         # save checkpoint
         checkpoint_name_suffix = ""
@@ -714,7 +720,7 @@ class GaussianSplatting(LightningModule):
                 "checkpoints",
                 "epoch={}-step={}{}-xyz_rgb.ply".format(self.trainer.current_epoch, self.trainer.global_step, checkpoint_name_suffix),
             ), xyz.cpu().numpy(), ((rgb + 0.5).clamp(min=0., max=1.) * 255).to(torch.int).cpu().numpy())
-        print("Checkpoint saved to {}".format(checkpoint_path))
+        self.print("Checkpoint saved to {}".format(checkpoint_path))
 
     def set_datamodule_device(self, device):
         # whether trainer exists

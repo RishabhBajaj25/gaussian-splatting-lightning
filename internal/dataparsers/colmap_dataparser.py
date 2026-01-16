@@ -36,6 +36,8 @@ class Colmap(DataParserConfig):
 
     mask_dir: str = None
 
+    sparse_dir: str = None
+
     split_mode: Literal["reconstruction", "experiment"] = "reconstruction"
 
     eval_image_select_mode: Literal["step", "ratio", "list", "list-optional"] = "step"
@@ -60,6 +62,10 @@ class Colmap(DataParserConfig):
 
     points_from: Literal["sfm", "random", "ply"] = "sfm"
 
+    n_max_points: int = -1
+
+    max_point_error: float = None
+
     ply_file: str = None
 
     n_random_points: int = 100_000
@@ -82,9 +88,12 @@ class ColmapDataParser(DataParser):
         return torch.floor(i + 0.5)
 
     def detect_sparse_model_dir(self) -> str:
-        if os.path.isdir(os.path.join(self.path, "sparse", "0")):
-            return os.path.join(self.path, "sparse", "0")
-        return os.path.join(self.path, "sparse")
+        sparse_dir = "sparse"
+        if self.params.sparse_dir is not None:
+            sparse_dir = self.params.sparse_dir
+        if os.path.isdir(os.path.join(self.path, sparse_dir, "0")):
+            return os.path.join(self.path, sparse_dir, "0")
+        return os.path.join(self.path, sparse_dir)
 
     def get_image_dir(self) -> str:
         if self.params.image_dir is None:
@@ -208,8 +217,14 @@ class ColmapDataParser(DataParser):
     def get_outputs(self) -> DataParserOutputs:
         # load colmap sparse model
         sparse_model_dir = self.detect_sparse_model_dir()
-        cameras = colmap_utils.read_cameras_binary(os.path.join(sparse_model_dir, "cameras.bin"))
-        images = colmap_utils.read_images_binary(os.path.join(sparse_model_dir, "images.bin"))
+        if os.path.exists(os.path.join(sparse_model_dir, "cameras.bin")):
+            cameras = colmap_utils.read_cameras_binary(os.path.join(sparse_model_dir, "cameras.bin"))
+            images = colmap_utils.read_images_binary(os.path.join(sparse_model_dir, "images.bin"))
+        elif os.path.exists(os.path.join(sparse_model_dir, "cameras.txt")):
+            cameras = colmap_utils.read_cameras_text(os.path.join(sparse_model_dir, "cameras.txt"))
+            images = colmap_utils.read_images_text(os.path.join(sparse_model_dir, "images.txt"))
+        else:
+            raise FileNotFoundError()
 
         # sort images
         images = dict(sorted(images.items(), key=lambda item: item[0]))
@@ -241,13 +256,9 @@ class ColmapDataParser(DataParser):
 
         # build appearance dict: group name -> image name list
         if self.params.appearance_groups is None:
-            print("appearance group by camera id")
             appearance_groups = {}
-            for i in images:
-                image_camera_id = images[i].camera_id
-                if image_camera_id not in appearance_groups:
-                    appearance_groups[image_camera_id] = []
-                appearance_groups[image_camera_id].append(images[i].name)
+            for i in images.values():
+                appearance_groups.setdefault(i.name, []).append(i.name)
         else:
             appearance_group_file_path = os.path.join(self.path, self.params.appearance_groups)
             print("loading appearance groups from {}".format(appearance_group_file_path))
@@ -366,13 +377,32 @@ class ColmapDataParser(DataParser):
 
         if self.params.points_from == "sfm":
             print("loading colmap 3D points")
-            xyz, rgb, _ = ColmapDataParser.read_points3D_binary(
-                os.path.join(sparse_model_dir, "points3D.bin"),
-                selected_image_ids=selected_image_ids,
-                mask_path_list=mask_path_list,
-                image_point_xys_list=image_point_xys_list,
-                image_point3D_ids_list=image_point3D_ids_list,
-            )
+            if os.path.exists(os.path.join(sparse_model_dir, "points3D.bin")):
+                xyz, rgb, point_errors = ColmapDataParser.read_points3D_binary(
+                    os.path.join(sparse_model_dir, "points3D.bin"),
+                    selected_image_ids=selected_image_ids,
+                    mask_path_list=mask_path_list,
+                    image_point_xys_list=image_point_xys_list,
+                    image_point3D_ids_list=image_point3D_ids_list,
+                )
+            elif os.path.exists(os.path.join(sparse_model_dir, "points3D.txt")):
+                points_from_txt = colmap_utils.read_points3D_text(os.path.join(sparse_model_dir, "points3D.txt"))
+                xyz = []
+                rgb = []
+                point_errors = []
+                for i in points_from_txt.values():
+                    xyz.append(i.xyz)
+                    rgb.append(i.rgb)
+                    point_errors.append(i.error)
+                xyz = np.asarray(xyz)
+                rgb = np.asarray(rgb)
+                point_errors = np.asarray(point_errors)
+
+            if self.params.max_point_error is not None and self.params.max_point_error > 0:
+                valid_point_mask = point_errors < self.params.max_point_error
+                print("valid points: {}/{}".format(valid_point_mask.sum(), valid_point_mask.shape[0]))
+                xyz = xyz[valid_point_mask]
+                rgb = rgb[valid_point_mask]
         else:
             # random points generated later
             xyz = np.ones((1, 3))
@@ -506,12 +536,22 @@ class ColmapDataParser(DataParser):
             rgb = basic_pcd.colors
             print("load {} points from {}".format(xyz.shape[0], self.params.ply_file))
 
+        if self.params.n_max_points > 0 and xyz.shape[0] > self.params.n_max_points:
+            print("[colmap dataparser] select {} of {} points".format(self.params.n_max_points, xyz.shape[0]))
+            point_indices = np.random.choice(xyz.shape[0], self.params.n_max_points)
+            xyz = xyz[point_indices]
+            rgb = rgb[point_indices]
+
         # print information
         print("[colmap dataparser] train set images: {}, val set images: {}, loaded mask: {}".format(
             len(image_set[0]),
             len(image_set[1]),
             loaded_mask_count,
         ))
+
+        if xyz.shape[0] == 0:
+            xyz = np.zeros((0, 3), dtype=np.float32)
+            rgb = np.zeros((0, 3), dtype=np.uint8)
 
         return DataParserOutputs(
             train_set=image_set[0],
